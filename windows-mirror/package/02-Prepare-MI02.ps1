@@ -16,7 +16,10 @@ Write-Host 'This step backs up the current MI_02 binding before opening Device M
 $preparation = & $prepareScript -OpenDeviceManager
 $manifest = Get-Content -LiteralPath $preparation.ManifestPath -Raw | ConvertFrom-Json
 $recoveryPointer = Join-Path $env:ProgramData 'ValeriaMirror\PortableTesterRecoveryManifest.txt'
-if ([bool] $manifest.OriginalBindingCapturedBeforeManualSelection) {
+$capturedProperty = $manifest.PSObject.Properties['OriginalBindingCapturedBeforeManualSelection']
+if ($capturedProperty -and
+    $capturedProperty.Value -is [bool] -and
+    $capturedProperty.Value -eq $true) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $recoveryPointer) -Force | Out-Null
     [IO.File]::WriteAllText(
         $recoveryPointer,

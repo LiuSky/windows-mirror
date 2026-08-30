@@ -41,8 +41,9 @@
 
 CI 成功后，在受信任 commit 对应的 **push** 或手动 Actions run 的 **Artifacts** 下载
 `ValeriaMirror-Windows-x64-delivery`（普通 Windows 10/11 电脑）或
-`ValeriaMirror-Windows-arm64-delivery`（Windows 11 ARM）。fork PR 只构建和测试，不会
-生成可交付包。GitHub 下载的外层压缩包包含 `DOWNLOAD-FIRST.txt`、便携测试 ZIP 与
+`ValeriaMirror-Windows-arm64-delivery`（Windows 11 ARM）。仓库当前的 PR workflow 只做
+构建测试；无论名称多么相似，都不要把 `pull_request` event 的 artifact 交给测试人员。
+GitHub 下载的外层压缩包包含 `DOWNLOAD-FIRST.txt`、便携测试 ZIP 与
 `.sha256` 校验文件；把后两个文件直接交给测试人员即可。测试人员必须完整解压便携 ZIP，
 先读 `README-FIRST.zh-CN.md`，再按
 `01-Preflight.cmd` → `02-Prepare-MI02.cmd` → `03-Start-Mirror.cmd` 执行，不需要源码、
