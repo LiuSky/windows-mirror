@@ -2,7 +2,6 @@
 
 #include <windows.h>
 #include <setupapi.h>
-#include <winusb.h>
 
 #include <algorithm>
 #include <array>
@@ -21,21 +20,26 @@
 
 namespace {
 
-// AppleUsb.inf from Apple's Microsoft Update Catalog driver exposes MI_01 with
-// this device-interface GUID and binds it to Microsoft's inbox WinUSB stack.
-constexpr GUID kAppleMi01InterfaceGuid = {
-    0x664be590,
-    0x54bd,
-    0x4964,
-    {0x8a, 0x8c, 0x6c, 0xd1, 0x31, 0x4f, 0x6d, 0xc2},
+// AppleUsbFilter (the official Apple UMDF component above MI_01) publishes a
+// MUX1 reference-string interface with this GUID. Applications must use its
+// IOCTL contract; the lower 664BE590... interface cannot be initialized as a
+// WinUSB handle while Apple's UMDF/filter stack is active.
+constexpr GUID kAppleMuxInterfaceGuid = {
+    0xf0b32be3,
+    0x6678,
+    0x4879,
+    {0x92, 0x30, 0xe4, 0x38, 0x45, 0xd8, 0x05, 0xee},
 };
 
+constexpr DWORD kAppleIoctlControlTransfer = 0x002200a0;
+constexpr DWORD kControlTransferTimeoutMs = 5000;
 constexpr UCHAR kRequestTypeVendorDeviceIn = 0xc0;
 constexpr UCHAR kRequestGetMode = 0x45;
 constexpr UCHAR kRequestSetMode = 0x52;
 constexpr USHORT kValeriaMode = 2;
 constexpr UCHAR kRequestTypeStandardDeviceIn = 0x80;
 constexpr UCHAR kRequestGetConfiguration = 0x08;
+constexpr UCHAR kRequestGetDescriptor = 0x06;
 constexpr UCHAR kDescriptorDevice = 0x01;
 constexpr UCHAR kDescriptorConfiguration = 0x02;
 constexpr UCHAR kDescriptorInterface = 0x04;
@@ -79,6 +83,7 @@ struct AppleUsbNode {
 
 struct TransferResult {
     bool ok = false;
+    bool submitted = false;
     DWORD error = ERROR_SUCCESS;
     ULONG transferred = 0;
     std::vector<UCHAR> data;
@@ -246,7 +251,7 @@ std::vector<DeviceInfo> EnumerateMi01Interfaces(DWORD* enumeration_error = nullp
         *enumeration_error = ERROR_SUCCESS;
     }
 
-    HDEVINFO set = SetupDiGetClassDevsW(&kAppleMi01InterfaceGuid,
+    HDEVINFO set = SetupDiGetClassDevsW(&kAppleMuxInterfaceGuid,
                                         nullptr,
                                         nullptr,
                                         DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
@@ -261,7 +266,7 @@ std::vector<DeviceInfo> EnumerateMi01Interfaces(DWORD* enumeration_error = nullp
         SP_DEVICE_INTERFACE_DATA interface_data{};
         interface_data.cbSize = sizeof(interface_data);
         if (!SetupDiEnumDeviceInterfaces(
-                set, nullptr, &kAppleMi01InterfaceGuid, index, &interface_data)) {
+                set, nullptr, &kAppleMuxInterfaceGuid, index, &interface_data)) {
             const DWORD error = GetLastError();
             if (error != ERROR_NO_MORE_ITEMS && enumeration_error != nullptr) {
                 *enumeration_error = error;
@@ -297,6 +302,12 @@ std::vector<DeviceInfo> EnumerateMi01Interfaces(DWORD* enumeration_error = nullp
         result.description = RegistryProperty(set, device_data, SPDRP_DEVICEDESC);
         result.service = RegistryProperty(set, device_data, SPDRP_SERVICE);
         result.hardware_ids = RegistryProperty(set, device_data, SPDRP_HARDWAREID);
+        const bool is_supported_mi01 =
+            ContainsInsensitive(result.instance_id, L"VID_05AC&PID_12A8&MI_01") ||
+            ContainsInsensitive(result.hardware_ids, L"VID_05AC&PID_12A8&MI_01");
+        if (!is_supported_mi01) {
+            continue;
+        }
         devices.push_back(std::move(result));
     }
 
@@ -341,13 +352,13 @@ bool IsClassicAmds(const AppleUsbNode& node) {
            ContainsInsensitive(node.description, L"Apple Mobile Device USB Driver");
 }
 
-class WinUsbSession {
+class AppleMuxSession {
   public:
-    WinUsbSession() = default;
-    WinUsbSession(const WinUsbSession&) = delete;
-    WinUsbSession& operator=(const WinUsbSession&) = delete;
+    AppleMuxSession() = default;
+    AppleMuxSession(const AppleMuxSession&) = delete;
+    AppleMuxSession& operator=(const AppleMuxSession&) = delete;
 
-    ~WinUsbSession() {
+    ~AppleMuxSession() {
         Close();
     }
 
@@ -364,86 +375,140 @@ class WinUsbSession {
             error = GetLastError();
             return false;
         }
-        if (!WinUsb_Initialize(file_, &usb_)) {
-            error = GetLastError();
-            CloseHandle(file_);
-            file_ = INVALID_HANDLE_VALUE;
-            return false;
-        }
         error = ERROR_SUCCESS;
         return true;
     }
 
-    void Close() {
-        if (usb_ != nullptr) {
-            WinUsb_Free(usb_);
-            usb_ = nullptr;
+    TransferResult ControlIn(UCHAR request_type,
+                             UCHAR request,
+                             USHORT value,
+                             USHORT index,
+                             USHORT length,
+                             DWORD timeout_ms = kControlTransferTimeoutMs) {
+        TransferResult result;
+        if (file_ == INVALID_HANDLE_VALUE) {
+            result.error = ERROR_INVALID_HANDLE;
+            return result;
         }
+
+        // AppleUsbFilter's 0x2200A0 ABI is an eight-byte packed
+        // WINUSB_SETUP_PACKET followed by the IN payload in the output buffer.
+        // This is the same contract used by Apple's own MobileDevice process.
+        std::vector<UCHAR> input(8, 0);
+        input[0] = request_type;
+        input[1] = request;
+        input[2] = static_cast<UCHAR>(value & 0xff);
+        input[3] = static_cast<UCHAR>((value >> 8) & 0xff);
+        input[4] = static_cast<UCHAR>(index & 0xff);
+        input[5] = static_cast<UCHAR>((index >> 8) & 0xff);
+        input[6] = static_cast<UCHAR>(length & 0xff);
+        input[7] = static_cast<UCHAR>((length >> 8) & 0xff);
+        std::vector<UCHAR> output(8 + static_cast<size_t>(length), 0);
+
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (overlapped.hEvent == nullptr) {
+            result.error = GetLastError();
+            return result;
+        }
+
+        DWORD returned = 0;
+        const BOOL immediate = DeviceIoControl(file_,
+                                               kAppleIoctlControlTransfer,
+                                               input.data(),
+                                               static_cast<DWORD>(input.size()),
+                                               output.data(),
+                                               static_cast<DWORD>(output.size()),
+                                               &returned,
+                                               &overlapped);
+        result.submitted = immediate != FALSE;
+        if (!immediate) {
+            const DWORD submit_error = GetLastError();
+            if (submit_error != ERROR_IO_PENDING) {
+                result.error = submit_error;
+                CloseHandle(overlapped.hEvent);
+                return result;
+            }
+            result.submitted = true;
+
+            const DWORD wait = WaitForSingleObject(overlapped.hEvent, timeout_ms);
+            if (wait == WAIT_TIMEOUT) {
+                CancelIoEx(file_, &overlapped);
+                WaitForSingleObject(overlapped.hEvent, INFINITE);
+                DWORD ignored = 0;
+                GetOverlappedResult(file_, &overlapped, &ignored, FALSE);
+                result.error = ERROR_TIMEOUT;
+                CloseHandle(overlapped.hEvent);
+                return result;
+            }
+            if (wait != WAIT_OBJECT_0) {
+                result.error = wait == WAIT_FAILED ? GetLastError() : ERROR_GEN_FAILURE;
+                CancelIoEx(file_, &overlapped);
+                WaitForSingleObject(overlapped.hEvent, INFINITE);
+                DWORD ignored = 0;
+                GetOverlappedResult(file_, &overlapped, &ignored, FALSE);
+                CloseHandle(overlapped.hEvent);
+                return result;
+            }
+            if (!GetOverlappedResult(file_, &overlapped, &returned, FALSE)) {
+                result.error = GetLastError();
+                CloseHandle(overlapped.hEvent);
+                return result;
+            }
+        }
+        CloseHandle(overlapped.hEvent);
+
+        if (returned < 8 || returned > static_cast<DWORD>(output.size())) {
+            result.error = ERROR_INVALID_DATA;
+            return result;
+        }
+        result.transferred = returned - 8;
+        result.data.assign(output.begin() + 8, output.begin() + returned);
+        result.ok = true;
+        result.error = ERROR_SUCCESS;
+        return result;
+    }
+
+    void Close() {
         if (file_ != INVALID_HANDLE_VALUE) {
             CloseHandle(file_);
             file_ = INVALID_HANDLE_VALUE;
         }
     }
 
-    WINUSB_INTERFACE_HANDLE usb() const {
-        return usb_;
-    }
-
   private:
     HANDLE file_ = INVALID_HANDLE_VALUE;
-    WINUSB_INTERFACE_HANDLE usb_ = nullptr;
 };
 
-TransferResult ControlIn(WINUSB_INTERFACE_HANDLE usb,
+TransferResult ControlIn(AppleMuxSession& session,
                          UCHAR request_type,
                          UCHAR request,
                          USHORT value,
                          USHORT index,
                          USHORT length) {
-    TransferResult result;
-    result.data.assign(length, 0xff);
-
-    WINUSB_SETUP_PACKET packet{};
-    packet.RequestType = request_type;
-    packet.Request = request;
-    packet.Value = value;
-    packet.Index = index;
-    packet.Length = length;
-
-    result.ok = WinUsb_ControlTransfer(usb,
-                                       packet,
-                                       result.data.data(),
-                                       static_cast<ULONG>(result.data.size()),
-                                       &result.transferred,
-                                       nullptr) != FALSE;
-    if (!result.ok) {
-        result.error = GetLastError();
-    }
-    if (result.transferred < result.data.size()) {
-        result.data.resize(result.transferred);
-    }
-    return result;
+    return session.ControlIn(request_type, request, value, index, length);
 }
 
-bool GetDescriptor(WINUSB_INTERFACE_HANDLE usb,
+bool GetDescriptor(AppleMuxSession& session,
                    UCHAR type,
                    UCHAR index,
                    std::vector<UCHAR>& buffer,
                    ULONG& transferred,
                    DWORD& error) {
     transferred = 0;
-    if (WinUsb_GetDescriptor(usb,
-                             type,
-                             index,
-                             0,
-                             buffer.data(),
-                             static_cast<ULONG>(buffer.size()),
-                             &transferred)) {
-        buffer.resize(transferred);
+    const auto result = ControlIn(session,
+                                  kRequestTypeStandardDeviceIn,
+                                  kRequestGetDescriptor,
+                                  static_cast<USHORT>((type << 8) | index),
+                                  0,
+                                  static_cast<USHORT>(buffer.size()));
+    if (result.ok) {
+        transferred = result.transferred;
+        buffer = result.data;
         error = ERROR_SUCCESS;
         return true;
     }
-    error = GetLastError();
+    error = result.error;
     buffer.clear();
     return false;
 }
@@ -453,12 +518,12 @@ USHORT ReadLe16(const std::vector<UCHAR>& bytes, size_t offset) {
            static_cast<USHORT>(static_cast<USHORT>(bytes[offset + 1]) << 8);
 }
 
-DescriptorSnapshot ReadDescriptors(WINUSB_INTERFACE_HANDLE usb) {
+DescriptorSnapshot ReadDescriptors(AppleMuxSession& session) {
     DescriptorSnapshot snapshot;
     std::vector<UCHAR> device(18, 0);
     ULONG transferred = 0;
     if (!GetDescriptor(
-            usb, kDescriptorDevice, 0, device, transferred, snapshot.device_error) ||
+            session, kDescriptorDevice, 0, device, transferred, snapshot.device_error) ||
         device.size() < 18) {
         if (snapshot.device_error == ERROR_SUCCESS) {
             snapshot.device_error = ERROR_INVALID_DATA;
@@ -476,7 +541,7 @@ DescriptorSnapshot ReadDescriptors(WINUSB_INTERFACE_HANDLE usb) {
         configuration.index = index;
 
         std::vector<UCHAR> header(9, 0);
-        if (!GetDescriptor(usb,
+        if (!GetDescriptor(session,
                            kDescriptorConfiguration,
                            index,
                            header,
@@ -500,7 +565,7 @@ DescriptorSnapshot ReadDescriptors(WINUSB_INTERFACE_HANDLE usb) {
         }
 
         std::vector<UCHAR> bytes(configuration.total_length, 0);
-        if (!GetDescriptor(usb,
+        if (!GetDescriptor(session,
                            kDescriptorConfiguration,
                            index,
                            bytes,
@@ -550,15 +615,16 @@ DescriptorSnapshot ReadDescriptors(WINUSB_INTERFACE_HANDLE usb) {
     return snapshot;
 }
 
-ProbeSnapshot CollectSnapshot(WINUSB_INTERFACE_HANDLE usb) {
+ProbeSnapshot CollectSnapshot(AppleMuxSession& session) {
     ProbeSnapshot snapshot;
 
     // Source of truth: libimobiledevice/usbmuxd master uses an IN vendor/device
     // request for both operations. GET_MODE is C0/45/value0/index0/length4.
-    snapshot.get_mode = ControlIn(usb, kRequestTypeVendorDeviceIn, kRequestGetMode, 0, 0, 4);
+    snapshot.get_mode =
+        ControlIn(session, kRequestTypeVendorDeviceIn, kRequestGetMode, 0, 0, 4);
     snapshot.get_configuration = ControlIn(
-        usb, kRequestTypeStandardDeviceIn, kRequestGetConfiguration, 0, 0, 1);
-    snapshot.descriptors = ReadDescriptors(usb);
+        session, kRequestTypeStandardDeviceIn, kRequestGetConfiguration, 0, 0, 1);
+    snapshot.descriptors = ReadDescriptors(session);
     return snapshot;
 }
 
@@ -635,12 +701,11 @@ std::string SnapshotFingerprint(const ProbeSnapshot& snapshot) {
 }
 
 void PrintDevice(const DeviceInfo& device, const std::string& prefix = "[INFO]") {
-    std::cout << prefix << " MI01 instance: " << Utf8(device.instance_id) << '\n';
+    std::cout << prefix << " MI01 MUX1 interface: present (device identifier redacted)\n";
     std::cout << prefix << " description: " << Utf8(device.description) << '\n';
     std::cout << prefix << " service: "
               << (device.service.empty() ? "<not reported>" : Utf8(device.service)) << '\n';
     std::cout << prefix << " hardware IDs: " << Utf8(device.hardware_ids) << '\n';
-    std::cout << prefix << " interface path: " << Utf8(device.path) << '\n';
 }
 
 void PrintTransfer(const char* name,
@@ -780,10 +845,10 @@ WaitResult WaitForReenumeration(const DeviceInfo& original,
             // re-enumeration, so sample it at a low rate while the path stays present.
             if (now >= next_probe && result.elapsed_ms >= 300) {
                 next_probe = now + std::chrono::milliseconds(500);
-                WinUsbSession session;
+                AppleMuxSession session;
                 DWORD open_error = ERROR_SUCCESS;
                 if (session.Open(current->path, open_error)) {
-                    ProbeSnapshot snapshot = CollectSnapshot(session.usb());
+                    ProbeSnapshot snapshot = CollectSnapshot(session);
                     if (SnapshotFingerprint(snapshot) != before_fingerprint ||
                         HasActiveValeria(snapshot)) {
                         result.state_changed = true;
@@ -811,9 +876,9 @@ std::optional<ProbeSnapshot> OpenAndProbe(const DeviceInfo& device,
                                          DWORD retry_ms = 0) {
     const auto start = std::chrono::steady_clock::now();
     while (true) {
-        WinUsbSession session;
+        AppleMuxSession session;
         if (session.Open(device.path, open_error)) {
-            return CollectSnapshot(session.usb());
+            return CollectSnapshot(session);
         }
         const auto elapsed = static_cast<DWORD>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -833,7 +898,6 @@ void PrintAppleNodes(const std::vector<AppleUsbNode>& nodes) {
     }
     std::cout << "[INFO] Present Apple USB nodes:\n";
     for (const auto& node : nodes) {
-        std::cout << "[INFO]   instance=" << Utf8(node.instance_id) << '\n';
         std::cout << "[INFO]   description=" << Utf8(node.description)
                   << " service="
                   << (node.service.empty() ? "<none>" : Utf8(node.service))
@@ -843,9 +907,9 @@ void PrintAppleNodes(const std::vector<AppleUsbNode>& nodes) {
 }
 
 void PrintOpenAdvice(DWORD error) {
-    std::cout << "[ERROR] WinUSB open failed: " << WindowsError(error) << '\n';
+    std::cout << "[ERROR] Apple MI01 MUX1 open failed: " << WindowsError(error) << '\n';
     if (error == ERROR_SHARING_VIOLATION || error == ERROR_ACCESS_DENIED) {
-        std::cout << "[ERROR] Apple Devices/iTunes or AppleMobileDeviceService may own MI01. "
+        std::cout << "[ERROR] Apple Devices/iTunes or AppleMobileDeviceService may own MUX1. "
                      "Close Apple device applications and retry from an elevated terminal. "
                      "This tool intentionally does not stop services.\n";
     }
@@ -863,9 +927,9 @@ int DiagnoseMissingMi01(DWORD enumeration_error) {
         std::cout << "[ERROR] RESULT state=UNSUPPORTED_CLASSIC_AMDS exit="
                   << kClassicAmdsOnly << '\n';
         std::cout << "[ERROR] The legacy usbaapl/usbaapl64 parent driver does not expose the "
-                     "public MI01 WinUSB GUID. Its private DeviceIoControl ABI is intentionally "
-                     "not guessed here. AMDeviceRequestAbbreviatedSendSync is a restore/signing "
-                     "request, not a raw USB control-transfer API.\n";
+                     "modern AppleUsbFilter MUX1 contract used here. Install Apple Devices; "
+                     "AMDeviceRequestAbbreviatedSendSync is a restore/signing request, not a "
+                     "raw USB control-transfer API.\n";
         return kClassicAmdsOnly;
     }
     if (nodes.empty()) {
@@ -873,10 +937,10 @@ int DiagnoseMissingMi01(DWORD enumeration_error) {
                   << '\n';
         return kNoAppleDevice;
     }
-    std::cout << "[ERROR] RESULT state=MI01_WINUSB_INTERFACE_MISSING exit="
+    std::cout << "[ERROR] RESULT state=MI01_APPLE_MUX_INTERFACE_MISSING exit="
               << kMi01InterfaceMissing << '\n';
-    std::cout << "[ERROR] An Apple USB device is present, but the Apple Catalog MI01 interface "
-                 "GUID is not exposed by the active driver stack.\n";
+    std::cout << "[ERROR] An Apple USB device is present, but AppleUsbFilter's MI01 MUX1 "
+                 "application interface is not exposed by the active driver stack.\n";
     return kMi01InterfaceMissing;
 }
 
@@ -966,7 +1030,7 @@ int RunProbe(const std::vector<DeviceInfo>& devices) {
     }
 
     if (!all_opened) {
-        std::cout << "[ERROR] RESULT state=MI01_PRESENT_BUT_NOT_OPENABLE exit=" << kOpenFailed
+        std::cout << "[ERROR] RESULT state=MI01_MUX_PRESENT_BUT_NOT_OPENABLE exit=" << kOpenFailed
                   << '\n';
         return kOpenFailed;
     }
@@ -977,16 +1041,16 @@ int RunProbe(const std::vector<DeviceInfo>& devices) {
 int RunEnable(const DeviceInfo& device, DWORD wait_ms) {
     PrintDevice(device);
 
-    WinUsbSession session;
+    AppleMuxSession session;
     DWORD open_error = ERROR_SUCCESS;
     if (!session.Open(device.path, open_error)) {
         PrintOpenAdvice(open_error);
-        std::cout << "[ERROR] RESULT state=MI01_PRESENT_BUT_NOT_OPENABLE exit=" << kOpenFailed
+        std::cout << "[ERROR] RESULT state=MI01_MUX_PRESENT_BUT_NOT_OPENABLE exit=" << kOpenFailed
                   << '\n';
         return kOpenFailed;
     }
 
-    const ProbeSnapshot before = CollectSnapshot(session.usb());
+    const ProbeSnapshot before = CollectSnapshot(session);
     PrintSnapshot(before, "before");
     if (HasActiveValeria(before)) {
         std::cout << "[OK] RESULT state=VALERIA_ALREADY_ACTIVE exit=0\n";
@@ -998,7 +1062,7 @@ int RunEnable(const DeviceInfo& device, DWORD wait_ms) {
     // request in quicktime_video_hack_windows. usbmuxd expects one response
     // byte and treats value 0 as acceptance.
     const TransferResult set_mode = ControlIn(
-        session.usb(), kRequestTypeVendorDeviceIn, kRequestSetMode, 0, kValeriaMode, 1);
+        session, kRequestTypeVendorDeviceIn, kRequestSetMode, 0, kValeriaMode, 1);
     PrintTransfer("SET_MODE", "C0/52 value=0 index=2 length=1", set_mode, 1);
     const bool request_accepted = set_mode.ok && set_mode.transferred == 1 &&
                                   set_mode.data.size() == 1 && set_mode.data.front() == 0;
@@ -1107,8 +1171,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     const auto selected = SelectDevices(all_devices, options->selector);
     if (selected.empty()) {
-        std::cout << "[ERROR] No MI01 interface matches --device '"
-                  << Utf8(options->selector) << "'.\n";
+        std::cout << "[ERROR] No MI01 MUX1 interface matches --device (selector redacted).\n";
         for (const auto& device : all_devices) {
             PrintDevice(device);
         }
@@ -1135,7 +1198,7 @@ int wmain(int argc, wchar_t** argv) {
 #include <iostream>
 
 int main() {
-    std::cerr << "valeria-activate is a Windows-only WinUSB diagnostic.\n";
+    std::cerr << "valeria-activate is a Windows-only Apple USB diagnostic.\n";
     return 64;
 }
 

@@ -28,8 +28,7 @@ foreach ($record in $records) {
     }
     if ($null -ne $record.OriginalConfigurationValue -and
         [int] $record.OriginalConfigurationValue -ne 2) {
-        Write-Warning "OriginalConfigurationValue is $($record.OriginalConfigurationValue); expected 2."
-        $failed = $true
+        Write-Warning "OriginalConfigurationValue is $($record.OriginalConfigurationValue), not the INF default 2. The healthy signed Apple parent/MI_01 stack remains authoritative; this tool will not rewrite it."
     }
     if ($null -ne $record.UsbccgpCapabilities -and
         [int] $record.UsbccgpCapabilities -ne 0x10) {

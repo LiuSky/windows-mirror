@@ -31,7 +31,7 @@ else {
 
         if ($null -ne $record.OriginalConfigurationValue -and
             [int] $record.OriginalConfigurationValue -ne 2) {
-            Write-Warning "Apple OriginalConfigurationValue is $($record.OriginalConfigurationValue), expected 2. This tool will not rewrite it."
+            Write-Warning "Apple OriginalConfigurationValue is $($record.OriginalConfigurationValue), not the INF default 2. The live healthy Apple stack is used and this tool will not rewrite it."
         }
         if ($null -ne $record.UsbccgpCapabilities -and
             [int] $record.UsbccgpCapabilities -ne 0x10) {

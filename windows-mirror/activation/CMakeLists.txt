@@ -19,7 +19,6 @@ if(WIN32)
     )
     target_link_libraries(valeria-activate PRIVATE
         setupapi
-        winusb
     )
     if(MINGW)
         # wmain is used so serial/instance selectors remain Unicode on Windows.

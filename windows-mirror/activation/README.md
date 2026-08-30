@@ -6,12 +6,12 @@
 
 ## 它做什么
 
-1. 用 SetupAPI 枚举 Apple Catalog 驱动公开的 MI01 GUID：`{664be590-54bd-4964-8a8c-6cd1314f6dc2}`。
-2. 用微软系统自带的 `winusb.sys` 打开 MI01，不安装 libusb0、libusb-win32 或 libusb filter。
+1. 用 SetupAPI 枚举 Apple 官方 `AppleUsbFilter` 在 MI01 上发布的 MUX1 应用接口：`{f0b32be3-6678-4879-9230-e43845d805ee}`。
+2. 直接打开 MUX1 句柄，通过 Apple 过滤层已有的 `0x2200A0` control-transfer IOCTL 通信；不会在受 Apple UMDF 管理的 MI01 句柄上再次调用 `WinUsb_Initialize`。
 3. 读取当前 mode、当前 configuration 和所有可读 USB descriptors。
 4. 使用 `--enable` 时发送 Valeria mode 2 请求，关闭旧句柄并观察 USB 断开/重枚举。
 5. 重开 MI01，只有“当前 configuration 内存在 `FF/2A/FF`”才输出 `VALERIA_ACTIVE`。
-6. 如果机器使用传统 AMDS `usbaapl64.sys`，明确输出 `UNSUPPORTED_CLASSIC_AMDS`，不会猜测其私有 IOCTL ABI。
+6. 如果机器使用传统 AMDS `usbaapl64.sys`，明确输出 `UNSUPPORTED_CLASSIC_AMDS`；这里只支持当前 Apple Devices 的 `AppleUsbFilter` MUX1 合同。
 
 程序不会停止 Apple 服务、不会写 `OriginalConfigurationValue`、不会改注册表、不会替换驱动。Apple Catalog 的 `AppleLowerFilter` 会根据 mode 返回值选择 preferred configuration；mode 2 常见返回以 `5` 开头，因此正常路径是它自动选择 configuration 5。
 
@@ -31,6 +31,11 @@
 - [初始 GET mode 参数](https://github.com/libimobiledevice/usbmuxd/blob/3ded00c9985a5108cfc7591a309f9a23d57a8cba/src/usb.c#L788-L805)
 
 用户原仓库中的旧请求是 `0x40/0x52/wIndex=2/wLength=0`。这个实现刻意不用旧格式；方向和响应长度是 iOS 18 排障时必须验证的差异。
+
+Windows 下 8 字节 setup header 与 `0x2200A0` 的缓冲区合同可与
+[libirecovery 的 Windows 后端](https://github.com/libimobiledevice/libirecovery/blob/95dec3aa25b1e30654ca107eb971971f6a216520/src/libirecovery.c#L1453-L1503)
+交叉核对。该 IOCTL 是 Apple 驱动的版本相关应用合同，不是微软公开 WinUSB API；
+程序对返回长度和超时采取 fail-closed，最终仍以重枚举后的描述符为准。
 
 ## 构建
 
@@ -73,9 +78,9 @@ cmake --build build --config Release
 | `0` | `PROBE_COMPLETE` / `VALERIA_ACTIVE` | 探测完成；激活模式下只有 active configuration 含 `FF/2A/FF` 才成功 |
 | `2` | `REENUMERATED_BUT_UNVERIFIED` 等 | 请求可能已接受，但描述符/句柄不足以确认 Valeria，不能当作镜像成功 |
 | `10` | `NO_APPLE_USB_DEVICE` | 未发现匹配设备 |
-| `11` | `UNSUPPORTED_CLASSIC_AMDS` | 传统 `usbaapl64.sys` 栈没有公开 MI01 WinUSB 接口 |
-| `12` | `MI01_WINUSB_INTERFACE_MISSING` | Apple USB 节点存在，但目标 GUID 不存在 |
-| `13` | `MI01_PRESENT_BUT_NOT_OPENABLE` | GUID 存在但 WinUSB 句柄打不开 |
+| `11` | `UNSUPPORTED_CLASSIC_AMDS` | 传统 `usbaapl64.sys` 栈没有当前 AppleUsbFilter MUX1 接口 |
+| `12` | `MI01_APPLE_MUX_INTERFACE_MISSING` | Apple USB 节点存在，但 MUX1 应用接口不存在 |
+| `13` | `MI01_MUX_PRESENT_BUT_NOT_OPENABLE` | MUX1 接口存在但句柄打不开 |
 | `14` | `AMBIGUOUS_DEVICE` | `--enable` 匹配多台设备 |
 | `20` | `SET_MODE_FAILED` | `C0/52` 没有得到 1 字节 `00`，且激活未验证 |
 | `21` | `MI01_DID_NOT_REAPPEAR` / `REENUMERATION_TIMEOUT` | USB 重枚举超时 |

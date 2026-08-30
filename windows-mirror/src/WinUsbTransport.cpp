@@ -6,6 +6,7 @@
 #include <usb.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cwctype>
 #include <limits>
@@ -16,10 +17,11 @@
 namespace valeria {
 namespace {
 
-constexpr GUID kAppleMi01InterfaceGuid = {
-    0x664be590, 0x54bd, 0x4964, {0x8a, 0x8c, 0x6c, 0xd1, 0x31, 0x4f, 0x6d, 0xc2}};
+constexpr GUID kAppleMuxInterfaceGuid = {
+    0xf0b32be3, 0x6678, 0x4879, {0x92, 0x30, 0xe4, 0x38, 0x45, 0xd8, 0x05, 0xee}};
 constexpr GUID kValeriaMi02InterfaceGuid = {
     0x77e935b1, 0xb768, 0x4316, {0xa4, 0x66, 0x4e, 0x74, 0x5c, 0xfd, 0xdb, 0x24}};
+constexpr DWORD kAppleIoctlControlTransfer = 0x002200a0;
 
 std::string utf8(const std::wstring& value) {
     if (value.empty()) {
@@ -101,53 +103,40 @@ std::string normalizedSelector(const std::string& input) {
     return input;
 }
 
-struct HandlePair {
+struct FileHandle {
     HANDLE file = INVALID_HANDLE_VALUE;
-    WINUSB_INTERFACE_HANDLE usb = nullptr;
 
-    HandlePair() = default;
-    HandlePair(const HandlePair&) = delete;
-    HandlePair& operator=(const HandlePair&) = delete;
-    HandlePair(HandlePair&& other) noexcept : file(other.file), usb(other.usb) {
+    FileHandle() = default;
+    FileHandle(const FileHandle&) = delete;
+    FileHandle& operator=(const FileHandle&) = delete;
+    FileHandle(FileHandle&& other) noexcept : file(other.file) {
         other.file = INVALID_HANDLE_VALUE;
-        other.usb = nullptr;
     }
-    HandlePair& operator=(HandlePair&& other) noexcept {
+    FileHandle& operator=(FileHandle&& other) noexcept {
         if (this != &other) {
-            if (usb) {
-                WinUsb_Free(usb);
-            }
             if (file != INVALID_HANDLE_VALUE) {
                 CloseHandle(file);
             }
             file = other.file;
-            usb = other.usb;
             other.file = INVALID_HANDLE_VALUE;
-            other.usb = nullptr;
         }
         return *this;
     }
 
-    ~HandlePair() {
-        if (usb) {
-            WinUsb_Free(usb);
-        }
+    ~FileHandle() {
         if (file != INVALID_HANDLE_VALUE) {
             CloseHandle(file);
         }
     }
 };
 
-HandlePair openRaw(const std::wstring& path) {
-    HandlePair result;
+FileHandle openAppleMux(const std::wstring& path) {
+    FileHandle result;
     result.file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
     if (result.file == INVALID_HANDLE_VALUE) {
-        throw UsbError(windowsError("CreateFile(WinUSB interface)"));
-    }
-    if (!WinUsb_Initialize(result.file, &result.usb)) {
-        throw UsbError(windowsError("WinUsb_Initialize"));
+        throw UsbError(windowsError("CreateFile(Apple MI_01 MUX1 interface)"));
     }
     return result;
 }
@@ -268,19 +257,19 @@ std::wstring WinUsbTransport::findDevicePath(const GUID& interfaceGuid,
 void WinUsbTransport::activateValeria(const std::string& deviceSelector,
                                       std::chrono::milliseconds timeout) {
     std::wstring id;
-    const std::wstring path = findDevicePath(kAppleMi01InterfaceGuid, deviceSelector, &id);
+    const std::wstring path = findDevicePath(kAppleMuxInterfaceGuid, deviceSelector, &id);
     if (path.empty()) {
-        throw UsbError("Apple MI_01 WinUSB interface was not found; install/repair Apple Devices");
+        throw UsbError(
+            "Apple MI_01 MUX1 interface was not found; install/repair Apple Devices");
     }
-    HandlePair handles = openRaw(path);
+    FileHandle handle = openAppleMux(path);
 
-    std::uint8_t response = 0xFF;
-    WINUSB_SETUP_PACKET setup{};
-    setup.RequestType = 0xC0;
-    setup.Request = 0x52;
-    setup.Value = 0;
-    setup.Index = 2; // Apple device mode 2; AppleLowerFilter selects preferred config.
-    setup.Length = 1;
+    // AppleUsbFilter's MUX1 contract: packed WINUSB_SETUP_PACKET followed by
+    // the response payload. MI_01 stays entirely on Apple's official stack;
+    // only the re-enumerated MI_02 is opened through the public WinUSB API.
+    std::array<std::uint8_t, 8> setup{
+        0xC0, 0x52, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00};
+    std::array<std::uint8_t, 9> response{};
 
     OVERLAPPED overlapped{};
     overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -288,13 +277,16 @@ void WinUsbTransport::activateValeria(const std::string& deviceSelector,
         throw UsbError(windowsError("CreateEvent(control transfer)"));
     }
     ULONG transferred = 0;
-    BOOL completed = WinUsb_ControlTransfer(handles.usb, setup, &response, 1,
-                                             &transferred, &overlapped);
+    BOOL completed = DeviceIoControl(handle.file, kAppleIoctlControlTransfer,
+                                     setup.data(),
+                                     static_cast<DWORD>(setup.size()), response.data(),
+                                     static_cast<DWORD>(response.size()), &transferred,
+                                     &overlapped);
     DWORD error = completed ? ERROR_SUCCESS : GetLastError();
     bool submittedPending = false;
     if (!completed && error == ERROR_IO_PENDING) {
         submittedPending = true;
-        const CompletionResult completion = finishOverlapped(handles.file, overlapped, timeout);
+        const CompletionResult completion = finishOverlapped(handle.file, overlapped, timeout);
         if (completion.success) {
             completed = TRUE;
             transferred = completion.transferred;
@@ -305,15 +297,15 @@ void WinUsbTransport::activateValeria(const std::string& deviceSelector,
     }
     CloseHandle(overlapped.hEvent);
 
-    // Once an asynchronous SET_MODE was accepted by WinUSB, any completion
-    // error can be the re-enumeration racing the old handle. Do not guess from
-    // Windows' final error code: open() performs the authoritative 30-second
-    // FF/2A/FF + bulk-pipe gate. Immediate submission errors still fail here.
+    // Once an asynchronous SET_MODE was accepted by AppleUsbFilter, any
+    // completion error can be the re-enumeration racing the old handle. The
+    // authoritative result remains open()'s FF/2A/FF + bulk-pipe gate.
     if (!completed && !submittedPending && error != ERROR_DEVICE_NOT_CONNECTED &&
         error != ERROR_OPERATION_ABORTED) {
         throw UsbError(windowsError("SET_MODE C0/52", error));
     }
-    if (completed && (transferred != 1 || response != 0)) {
+    if (completed &&
+        (transferred != static_cast<ULONG>(response.size()) || response[8] != 0)) {
         throw UsbError("SET_MODE C0/52 returned an unexpected response");
     }
 }

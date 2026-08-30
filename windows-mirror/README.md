@@ -29,6 +29,11 @@ iPhone (iOS 18, Apple mode 2)
 - Apple 官方 MI_01（usbmux）保留。
 - 只有 PID `12A8` 的 MI_02 使用微软系统自带 `winusb.sys`。
 
+mode 2 激活通过 AppleUsbFilter 自己发布的 MI_01 MUX1 应用接口完成；程序使用
+Apple 过滤层已有的 control-transfer IOCTL，不对 Apple 管理的下层 MI_01 路径
+强行调用 `WinUsb_Initialize`。MI_02 的连续 bulk 媒体流仍是独立的微软 inbox
+WinUSB 通道。
+
 默认路线不安装项目 INF：先在设备管理器中只给 MI_02 手动选择 Microsoft
 系统自带的 **WinUSB Device**（`winusb.inf / winusb.sys`），再由脚本给这个
 devnode 写入应用 GUID。它会在绑定期间占用同一个 MI_02 硬件 ID，因此 USB

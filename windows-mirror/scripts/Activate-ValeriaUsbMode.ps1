@@ -23,12 +23,10 @@ if (-not $stack.AppleStackHealthy) {
 }
 
 $resolvedActivationExe = Resolve-ValeriaActivationExecutable -ActivationExe $ActivationExe
-$selector = if ($DeviceSelector) {
-    $DeviceSelector
-}
-else {
-    ($stack.ParentInstanceId -split '\\')[-1]
-}
+# DeviceSelector chooses the Apple parent stack. The activator enumerates
+# AppleUsbFilter's MI_01 MUX1 application interface, whose path does not carry
+# the composite parent's serial as a directly matchable segment.
+$selector = [string] $stack.AppleMuxInstanceId
 
 Write-Host 'Requesting Apple mode 2 through official MI_01; MI_02 is not required yet...'
 Invoke-ValeriaMode2Activation `

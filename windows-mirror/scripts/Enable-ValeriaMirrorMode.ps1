@@ -38,12 +38,7 @@ if (-not $stack.AppleStackHealthy) {
 }
 
 $resolvedActivationExe = Resolve-ValeriaActivationExecutable -ActivationExe $ActivationExe
-$selector = if ($DeviceSelector) {
-    $DeviceSelector
-}
-else {
-    ($stack.ParentInstanceId -split '\\')[-1]
-}
+$selector = [string] $stack.AppleMuxInstanceId
 
 Write-Host 'Requesting Apple mode 2. AppleLowerFilter should select effective configuration 5...'
 Invoke-ValeriaMode2Activation `

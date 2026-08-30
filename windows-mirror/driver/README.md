@@ -21,12 +21,18 @@ Apple's current `AppleUsb.inf` creates separate PnP nodes:
 | `...&MI_01` | Apple package: WinUSB + `WUDFRd` + `AppleKmdfFilter`/UMDF |
 | `...&MI_02` | Microsoft package: in-box `winusb.inf` / `winusb.sys` |
 
-The Apple parent install section includes `usb.inf` / `Composite.Dev.NT`, sets
-`OriginalConfigurationValue=2` and `UsbccgpCapabilities=0x10`, and adds
-`AppleLowerFilter`. Apple's MI_01 section publishes GUID
-`{664be590-54bd-4964-8a8c-6cd1314f6dc2}`. The scripts verify those official
-bindings and never replace or edit them. The legacy `usbaapl64.sys` parent is
-not supported by this route; install/repair the current Apple Devices package.
+The Apple parent install section includes `usb.inf` / `Composite.Dev.NT`, has
+an INF default `OriginalConfigurationValue=2`, sets
+`UsbccgpCapabilities=0x10`, and adds `AppleLowerFilter`. Apple's MI_01 section
+uses the lower GUID `{664be590-54bd-4964-8a8c-6cd1314f6dc2}` while its official
+UMDF component dynamically publishes the application-facing MUX1 GUID
+`{f0b32be3-6678-4879-9230-e43845d805ee}`. The activator opens MUX1 and uses
+AppleUsbFilter's control IOCTL; it does not call `WinUsb_Initialize` on the
+lower MI_01 path. The scripts verify the signed Apple bindings and never
+replace or edit them. A healthy live stack remains authoritative if its
+runtime `OriginalConfigurationValue` differs from the INF default. The legacy
+`usbaapl64.sys` parent is not supported by this route; install/repair the
+current Apple Devices package.
 
 Apple's INF has no MI_02 Valeria bulk-access binding. An Apple-only setup can
 activate the hidden configuration through MI_01, but it cannot open MI_02's
