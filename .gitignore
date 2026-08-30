@@ -1,0 +1,33 @@
+.build/
+.swiftpm/
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+
+# Local CMake/Visual Studio output. GitHub Actions publishes executables as
+# workflow artifacts instead of committing them.
+build/
+windows-build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+.vs/
+*.obj
+*.lib
+*.pdb
+*.exe
+*.dll
+*.sys
+
+# Never publish locally generated driver certificates or catalogs.
+*.cat
+*.cer
+*.pfx
+windows-mirror/driver/optional-inf/test-signing/
+
+dist/
+captures/
+*.log
+.DS_Store

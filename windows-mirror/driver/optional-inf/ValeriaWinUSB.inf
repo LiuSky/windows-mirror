@@ -1,0 +1,40 @@
+; ValeriaWinUSB.inf
+; Binds only the iPhone 12A8 MI_02 child PDO to the Microsoft inbox WinUSB
+; driver. The USB\VID_05AC&PID_12A8 parent remains on usbccgp with Apple's
+; AppleLowerFilter, and MI_01 remains on Apple's official WinUSB stack.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USBDevice
+ClassGuid={88BAE032-5A81-49F0-BC3D-A4FF138216D6}
+Provider=%ProviderName%
+CatalogFile=ValeriaWinUSB.cat
+DriverVer=08/30/2026,1.0.0.0
+PnpLockdown=1
+
+[Manufacturer]
+%ProviderName%=Models,NTamd64,NTarm64
+
+[Models.NTamd64]
+%DeviceName%=Valeria_Install,USB\VID_05AC&PID_12A8&MI_02
+
+[Models.NTarm64]
+%DeviceName%=Valeria_Install,USB\VID_05AC&PID_12A8&MI_02
+
+[Valeria_Install]
+Include=winusb.inf
+Needs=WINUSB.NT
+
+[Valeria_Install.Services]
+Include=winusb.inf
+Needs=WINUSB.NT.Services
+
+[Valeria_Install.HW]
+AddReg=Valeria_AddReg
+
+[Valeria_AddReg]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{77E935B1-B768-4316-A466-4E745CFDDB24}"
+
+[Strings]
+ProviderName="Valeria Mirror Project"
+DeviceName="Apple Valeria Screen Mirror Interface (WinUSB)"
