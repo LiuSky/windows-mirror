@@ -30,7 +30,10 @@ UMDF component dynamically publishes the application-facing MUX1 GUID
 AppleUsbFilter's control IOCTL; it does not call `WinUsb_Initialize` on the
 lower MI_01 path. The scripts verify the signed Apple bindings and never
 replace or edit them. A healthy live stack remains authoritative if its
-runtime `OriginalConfigurationValue` differs from the INF default. The legacy
+runtime `OriginalConfigurationValue` differs from the INF default. In
+particular, AppleLowerFilter can write `4` when it selects the fifth descriptor
+(`configuration 5`); this is the expected zero-based descriptor index and must
+not be rewritten to `5`. The legacy
 `usbaapl64.sys` parent is not supported by this route; install/repair the
 current Apple Devices package.
 
@@ -128,6 +131,21 @@ the selection to 5.
 No script writes `OriginalConfigurationValue`. Success is accepted only when
 the activator returns verified `VALERIA_ACTIVE` and the re-enumerated MI_02
 reports `FF/2A/FF` through the Microsoft WinUSB binding.
+
+## Parallels re-enumeration limitation
+
+Mode switching disconnects and re-enumerates the iPhone. On macOS hosts,
+Parallels must retain exclusive ownership across that boundary. If macOS
+`usbmuxd` or Apple USB-NCM drivers reclaim an interface first, Windows can show
+the PID_12A8 parent as Code 10 and no usable MI_02 will exist. A `00` response
+from SET_MODE is not success in this state.
+
+Do not bind an NCM `02/0D/00` child to WinUSB and do not change
+`OriginalConfigurationValue` to work around it. Reassign or physically
+reconnect the whole iPhone to the VM and rerun the descriptor gate. If the VM
+still cannot retain the device and expose `FF/2A/FF`, use a physical Windows
+host for the hardware test; CI and protocol fixtures cannot validate this USB
+ownership boundary.
 
 ## Restore normal MI_02 networking
 

@@ -96,6 +96,13 @@ ctest --test-dir build -C Release --output-on-failure
 不要硬编码 configuration 5/6 或端点号。AppleLowerFilter 选择配置，主程序
 再动态验证 interface class/subclass/protocol 和 bulk IN/OUT pipes。
 
+在 Parallels 中，mode 切换后的 USB 重枚举还有一层宿主所有权门槛：macOS 的
+`usbmuxd`/Apple USB-NCM 若先抢回接口，Windows 会出现父设备 Code 10，且不会得到
+可用的 Valeria MI_02。SET_MODE 返回 `00` 只能证明手机接受了请求，不能越过这个
+门槛。不要改 AppleLowerFilter 写下的 `OriginalConfigurationValue=4`（它表示第五个
+descriptor），也不要把 `02/0D/00` NCM 节点误绑为镜像接口；无法稳定保留整机直通时，
+必须在实体 Windows 上完成最终 USB 验证。
+
 ## 启动实时镜像
 
 连接一台已解锁/已信任的 iPhone：

@@ -37,6 +37,17 @@
 按 `Ctrl+C` 正常停止。`[LIVE] fps` 只代表收到的 FEED sample，不能单独替代
 动态窗口验收。
 
+### Parallels 特别说明
+
+mode 2 会让 iPhone 断开并重新枚举。Parallels 必须在这一瞬间继续独占整台手机；
+如果 macOS 的 `usbmuxd` 或 Apple USB-NCM 驱动先抢回接口，Windows 可能显示父设备
+Code 10，且看不到可用的 `MI_02`。即使 SET_MODE 已返回单字节 `00`，这种状态也不算
+激活成功。
+
+此时不要把仍为 `02/0D/00` 的 NCM 子设备绑定到 WinUSB，也不要修改
+`OriginalConfigurationValue`。先把整台 iPhone 重新分配/物理重插到虚拟机后重试；
+如果仍无法得到 `FF/2A/FF`，应改用实体 Windows 主机完成 USB 硬件验收。
+
 ## 恢复
 
 需要恢复原来的 `MI_02` 驱动/USB 网络功能时，右键

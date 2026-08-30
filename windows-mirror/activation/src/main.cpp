@@ -849,12 +849,21 @@ WaitResult WaitForReenumeration(const DeviceInfo& original,
                 DWORD open_error = ERROR_SUCCESS;
                 if (session.Open(current->path, open_error)) {
                     ProbeSnapshot snapshot = CollectSnapshot(session);
-                    if (SnapshotFingerprint(snapshot) != before_fingerprint ||
-                        HasActiveValeria(snapshot)) {
+                    // A path can remain visible briefly while the old devnode is
+                    // tearing down.  Failed control reads produce a different
+                    // fingerprint too, but are not evidence that the new USB
+                    // configuration is ready.  Only accept a readable device
+                    // descriptor as a state-change sample.
+                    if (snapshot.descriptors.device_ok &&
+                        (SnapshotFingerprint(snapshot) != before_fingerprint ||
+                         HasActiveValeria(snapshot))) {
                         result.state_changed = true;
                         result.saw_reappearance = true;
                         result.snapshot = std::move(snapshot);
                         break;
+                    }
+                    if (!snapshot.descriptors.device_ok) {
+                        result.last_open_error = snapshot.descriptors.device_error;
                     }
                 } else {
                     result.last_open_error = open_error;
@@ -875,17 +884,23 @@ std::optional<ProbeSnapshot> OpenAndProbe(const DeviceInfo& device,
                                          DWORD& open_error,
                                          DWORD retry_ms = 0) {
     const auto start = std::chrono::steady_clock::now();
+    std::optional<ProbeSnapshot> last_snapshot;
     while (true) {
         AppleMuxSession session;
         if (session.Open(device.path, open_error)) {
-            return CollectSnapshot(session);
+            ProbeSnapshot snapshot = CollectSnapshot(session);
+            if (snapshot.descriptors.device_ok || retry_ms == 0) {
+                return snapshot;
+            }
+            open_error = snapshot.descriptors.device_error;
+            last_snapshot = std::move(snapshot);
         }
         const auto elapsed = static_cast<DWORD>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start)
                 .count());
         if (elapsed >= retry_ms) {
-            return std::nullopt;
+            return last_snapshot;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
