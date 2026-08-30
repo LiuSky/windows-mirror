@@ -14,6 +14,20 @@ foreach ($requiredPath in @($prepareScript, $installScript)) {
 
 Write-Host 'This step backs up the current MI_02 binding before opening Device Manager.'
 $preparation = & $prepareScript -OpenDeviceManager
+$manifest = Get-Content -LiteralPath $preparation.ManifestPath -Raw | ConvertFrom-Json
+$recoveryPointer = Join-Path $env:ProgramData 'ValeriaMirror\PortableTesterRecoveryManifest.txt'
+if ([bool] $manifest.OriginalBindingCapturedBeforeManualSelection) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $recoveryPointer) -Force | Out-Null
+    [IO.File]::WriteAllText(
+        $recoveryPointer,
+        $preparation.ManifestPath,
+        [Text.Encoding]::UTF8
+    )
+    Write-Host "Saved the pre-WinUSB recovery manifest: $recoveryPointer"
+}
+else {
+    Write-Warning 'MI_02 was already on WinUSB, so the earlier recovery pointer was not overwritten.'
+}
 
 Write-Host ''
 Write-Warning 'In Device Manager, change ONLY the exact MI_02 instance printed above.'

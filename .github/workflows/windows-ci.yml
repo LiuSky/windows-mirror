@@ -133,6 +133,7 @@ jobs:
           }
 
       - name: Assemble portable tester package
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           $packageName = '${{ matrix.package_name }}'
@@ -173,16 +174,34 @@ jobs:
                   $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
                   "$hash  bin/$($_.Name)"
               }
-          $executableHashes |
-              Set-Content -LiteralPath (Join-Path $packageRoot 'SHA256SUMS.txt') -Encoding ascii
+          $executableHashText = ($executableHashes -join "`n") + "`n"
+          [IO.File]::WriteAllText(
+              (Join-Path $packageRoot 'SHA256SUMS.txt'),
+              $executableHashText,
+              [Text.Encoding]::ASCII
+          )
 
           $zipPath = Join-Path $outputDirectory "$packageName.zip"
           Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
           $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$zipHash  $packageName.zip" |
-              Set-Content -LiteralPath "$zipPath.sha256" -Encoding ascii
+          [IO.File]::WriteAllText(
+              "$zipPath.sha256",
+              "$zipHash  $packageName.zip`n",
+              [Text.Encoding]::ASCII
+          )
+
+          @(
+              '这是 GitHub Actions 下载后的外层压缩包。'
+              "请把 $packageName.zip 和 $packageName.zip.sha256 交给测试人员。"
+              '测试人员必须完整解压便携 ZIP，再运行其中的 CMD 文件。'
+              '只信任预期 commit 的 push/workflow_dispatch 运行所生成的包。'
+              "Expected commit: $env:GITHUB_SHA"
+          ) | Set-Content `
+              -LiteralPath (Join-Path $outputDirectory 'DOWNLOAD-FIRST.txt') `
+              -Encoding utf8
 
       - name: Validate portable tester package
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           $packageName = '${{ matrix.package_name }}'
@@ -213,13 +232,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Packaged mirror --help failed' }
           & (Join-Path $packageRoot 'bin\valeria-activate.exe') --help
           if ($LASTEXITCODE -ne 0) { throw 'Packaged activator --help failed' }
+          if (-not (Test-Path -LiteralPath (Join-Path $PWD 'package-output\DOWNLOAD-FIRST.txt'))) {
+              throw 'Outer artifact download instructions are missing'
+          }
 
       - name: Upload portable Windows tester package
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.package_name }}
+          name: ${{ matrix.package_name }}-delivery
           if-no-files-found: error
           retention-days: 14
           path: |
+            package-output/DOWNLOAD-FIRST.txt
             package-output/${{ matrix.package_name }}.zip
             package-output/${{ matrix.package_name }}.zip.sha256

@@ -39,10 +39,12 @@
 
 ### 直接交给测试人员的包
 
-CI 成功后，在对应 Actions run 的 **Artifacts** 下载 `ValeriaMirror-Windows-x64`（普通
-Windows 10/11 电脑）或 `ValeriaMirror-Windows-arm64`（Windows 11 ARM）。GitHub 下载的
-外层压缩包里包含同名的便携测试 ZIP 与 `.sha256` 校验文件；把这两个文件直接交给测试
-人员即可。测试人员解压便携 ZIP，先读 `README-FIRST.zh-CN.md`，再按
+CI 成功后，在受信任 commit 对应的 **push** 或手动 Actions run 的 **Artifacts** 下载
+`ValeriaMirror-Windows-x64-delivery`（普通 Windows 10/11 电脑）或
+`ValeriaMirror-Windows-arm64-delivery`（Windows 11 ARM）。fork PR 只构建和测试，不会
+生成可交付包。GitHub 下载的外层压缩包包含 `DOWNLOAD-FIRST.txt`、便携测试 ZIP 与
+`.sha256` 校验文件；把后两个文件直接交给测试人员即可。测试人员必须完整解压便携 ZIP，
+先读 `README-FIRST.zh-CN.md`，再按
 `01-Preflight.cmd` → `02-Prepare-MI02.cmd` → `03-Start-Mirror.cmd` 执行，不需要源码、
 Visual Studio 或 CMake。
 
