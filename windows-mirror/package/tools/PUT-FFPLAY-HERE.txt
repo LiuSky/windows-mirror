@@ -1,0 +1,5 @@
+You may place a standalone ffplay.exe in this directory.
+
+Alternatively, install FFmpeg so ffplay.exe is on PATH, set the
+VALERIA_FFPLAY environment variable, or enter the full path when prompted by
+03-Start-Mirror.cmd.

@@ -1,0 +1,6 @@
+paths:
+  .github/workflows/windows-ci.yml:
+    ignore:
+      # GitHub made this hosted runner GA on 2026-08-19. actionlint 1.7.12's
+      # built-in label table predates it.
+      - 'label "windows-11-vs2026-arm" is unknown'

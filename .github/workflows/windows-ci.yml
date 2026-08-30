@@ -1,0 +1,249 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows Server 2022 / VS 2022 / x64
+            os: windows-2022
+            generator: Visual Studio 17 2022
+            architecture: x64
+            package_name: ValeriaMirror-Windows-x64
+          - name: Windows Server 2025 / VS 2026 / x64
+            os: windows-2025-vs2026
+            generator: Visual Studio 18 2026
+            architecture: x64
+            package_name: ValeriaMirror-Windows-x64-vs2026
+          - name: Windows 11 / VS 2026 / ARM64
+            os: windows-11-vs2026-arm
+            generator: Visual Studio 18 2026
+            architecture: ARM64
+            package_name: ValeriaMirror-Windows-arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Show Windows toolchain
+        shell: pwsh
+        run: |
+          Write-Host "Runner OS: $env:RUNNER_OS"
+          Write-Host "Runner architecture: $env:RUNNER_ARCH"
+          cmake --version
+
+      - name: Parse scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+              throw "Expected Windows PowerShell 5.1"
+          }
+
+          $messages = @()
+          $files = Get-ChildItem windows-mirror -Recurse -File -Filter *.ps1
+          foreach ($file in $files) {
+              $tokens = $null
+              $errors = $null
+              $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                  $file.FullName,
+                  [ref] $tokens,
+                  [ref] $errors
+              )
+
+              foreach ($error in @($errors)) {
+                  $messages += (
+                      "{0}:{1}:{2}: {3}" -f
+                      $file.FullName,
+                      $error.Extent.StartLineNumber,
+                      $error.Extent.StartColumnNumber,
+                      $error.Message
+                  )
+              }
+          }
+
+          if ($messages.Count -gt 0) {
+              $messages | ForEach-Object { Write-Host $_ }
+              throw "$($messages.Count) PowerShell parse error(s)"
+          }
+
+      - name: Analyze PowerShell scripts
+        shell: pwsh
+        run: |
+          Import-Module PSScriptAnalyzer
+          $issues = @(
+              Invoke-ScriptAnalyzer `
+                  -Path windows-mirror `
+                  -Recurse `
+                  -Severity Error
+          )
+          $issues | Format-Table -AutoSize
+          if ($issues.Count -gt 0) {
+              throw "$($issues.Count) PSScriptAnalyzer error(s)"
+          }
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake `
+            -S windows-mirror `
+            -B windows-build `
+            -G "${{ matrix.generator }}" `
+            -A "${{ matrix.architecture }}" `
+            -DVALERIA_BUILD_TESTS=ON `
+            -DVALERIA_BUILD_ACTIVATOR=ON `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build windows-build --config Release --parallel
+
+      - name: Run protocol tests
+        shell: pwsh
+        run: |
+          ctest `
+            --test-dir windows-build `
+            -C Release `
+            --output-on-failure `
+            --no-tests=error
+
+      - name: Smoke-test Windows executables
+        shell: pwsh
+        run: |
+          & .\windows-build\Release\iphone-valeria-mirror.exe --help
+          if ($LASTEXITCODE -ne 0) {
+              throw "iphone-valeria-mirror.exe --help failed"
+          }
+
+          & .\windows-build\activation\Release\valeria-activate.exe --help
+          if ($LASTEXITCODE -ne 0) {
+              throw "valeria-activate.exe --help failed"
+          }
+
+      - name: Assemble portable tester package
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $packageName = '${{ matrix.package_name }}'
+          $outputDirectory = Join-Path $PWD 'package-output'
+          $packageRoot = Join-Path $outputDirectory $packageName
+
+          New-Item -ItemType Directory -Path (Join-Path $packageRoot 'bin') -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageRoot 'scripts') -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageRoot 'licenses') -Force | Out-Null
+
+          Copy-Item `
+            .\windows-build\Release\iphone-valeria-mirror.exe `
+            (Join-Path $packageRoot 'bin\iphone-valeria-mirror.exe')
+          Copy-Item `
+            .\windows-build\activation\Release\valeria-activate.exe `
+            (Join-Path $packageRoot 'bin\valeria-activate.exe')
+          Copy-Item .\windows-mirror\scripts\* (Join-Path $packageRoot 'scripts') -Recurse
+          Copy-Item .\windows-mirror\package\* $packageRoot -Recurse
+          Copy-Item .\windows-mirror\README.md (Join-Path $packageRoot 'TECHNICAL-README.md')
+          Copy-Item .\windows-mirror\driver\README.md (Join-Path $packageRoot 'DRIVER-DETAILS.md')
+          Copy-Item .\windows-mirror\THIRD_PARTY_NOTICES.md $packageRoot
+          Copy-Item .\windows-mirror\LICENSES\* (Join-Path $packageRoot 'licenses') -Recurse
+          Copy-Item .\LICENSE (Join-Path $packageRoot 'LICENSE')
+
+          @(
+              "Package=$packageName"
+              "Architecture=${{ matrix.architecture }}"
+              "Runner=${{ matrix.os }}"
+              "Generator=${{ matrix.generator }}"
+              "Commit=$env:GITHUB_SHA"
+              "BuiltUtc=$([DateTime]::UtcNow.ToString('o'))"
+              'Runtime=static MSVC CRT'
+          ) | Set-Content -LiteralPath (Join-Path $packageRoot 'BUILD-INFO.txt') -Encoding utf8
+
+          $executableHashes = Get-ChildItem -LiteralPath (Join-Path $packageRoot 'bin') -File |
+              Sort-Object Name |
+              ForEach-Object {
+                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  "$hash  bin/$($_.Name)"
+              }
+          $executableHashText = ($executableHashes -join "`n") + "`n"
+          [IO.File]::WriteAllText(
+              (Join-Path $packageRoot 'SHA256SUMS.txt'),
+              $executableHashText,
+              [Text.Encoding]::ASCII
+          )
+
+          $zipPath = Join-Path $outputDirectory "$packageName.zip"
+          Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
+          $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+              "$zipPath.sha256",
+              "$zipHash  $packageName.zip`n",
+              [Text.Encoding]::ASCII
+          )
+
+          @(
+              '这是 GitHub Actions 下载后的外层压缩包。'
+              "请把 $packageName.zip 和 $packageName.zip.sha256 交给测试人员。"
+              '测试人员必须完整解压便携 ZIP，再运行其中的 CMD 文件。'
+              '只信任预期 commit 的 push/workflow_dispatch 运行所生成的包。'
+              "Expected commit: $env:GITHUB_SHA"
+          ) | Set-Content `
+              -LiteralPath (Join-Path $outputDirectory 'DOWNLOAD-FIRST.txt') `
+              -Encoding utf8
+
+      - name: Validate portable tester package
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $packageName = '${{ matrix.package_name }}'
+          $zipPath = Join-Path $PWD "package-output\$packageName.zip"
+          $verificationRoot = Join-Path $PWD 'package-verification'
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $verificationRoot
+          $packageRoot = Join-Path $verificationRoot $packageName
+
+          $requiredFiles = @(
+              'README-FIRST.zh-CN.md',
+              '01-Preflight.cmd',
+              '02-Prepare-MI02.cmd',
+              '03-Start-Mirror.cmd',
+              '04-Restore-Apple-MI02.cmd',
+              'bin\iphone-valeria-mirror.exe',
+              'bin\valeria-activate.exe',
+              'scripts\ValeriaUsb.Common.ps1',
+              'BUILD-INFO.txt',
+              'SHA256SUMS.txt'
+          )
+          foreach ($relativePath in $requiredFiles) {
+              if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $relativePath) -PathType Leaf)) {
+                  throw "Portable package is missing $relativePath"
+              }
+          }
+
+          & (Join-Path $packageRoot 'bin\iphone-valeria-mirror.exe') --help
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged mirror --help failed' }
+          & (Join-Path $packageRoot 'bin\valeria-activate.exe') --help
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged activator --help failed' }
+          if (-not (Test-Path -LiteralPath (Join-Path $PWD 'package-output\DOWNLOAD-FIRST.txt'))) {
+              throw 'Outer artifact download instructions are missing'
+          }
+
+      - name: Upload portable Windows tester package
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.package_name }}-delivery
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            package-output/DOWNLOAD-FIRST.txt
+            package-output/${{ matrix.package_name }}.zip
+            package-output/${{ matrix.package_name }}.zip.sha256
