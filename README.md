@@ -37,6 +37,19 @@
 
 每个 job 会用 MSVC/Windows SDK 编译、链接 `setupapi.lib` 与 `winusb.lib`，运行全部 CTest/golden FEED/EAT 回归，解析并静态检查 PowerShell，实际启动两个 Windows EXE 的帮助入口，最后上传可下载的测试包。GitHub 托管 runner 是远端新建的 VM，无法看到插在本机的 iPhone，所以它不能证明 Apple USB 枚举、MI_02 bulk、连续解码或实时窗口；这部分仍必须用有物理 USB 的 Windows 环境。[GitHub 当前 runner 列表与边界](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 
+### 直接交给测试人员的包
+
+CI 成功后，在对应 Actions run 的 **Artifacts** 下载 `ValeriaMirror-Windows-x64`（普通
+Windows 10/11 电脑）或 `ValeriaMirror-Windows-arm64`（Windows 11 ARM）。GitHub 下载的
+外层压缩包里包含同名的便携测试 ZIP 与 `.sha256` 校验文件；把这两个文件直接交给测试
+人员即可。测试人员解压便携 ZIP，先读 `README-FIRST.zh-CN.md`，再按
+`01-Preflight.cmd` → `02-Prepare-MI02.cmd` → `03-Start-Mirror.cmd` 执行，不需要源码、
+Visual Studio 或 CMake。
+
+这是免编译的实机验收包，不是能静默修改 USB 驱动的 MSI。Apple Devices、`ffplay.exe`
+以及首次只给 `MI_02` 手工选择 Microsoft **WinUSB Device** 仍是必要步骤；父节点和
+`MI_01` 始终保留 Apple 官方驱动。
+
 这台 Apple Silicon Mac 上的首选真机环境是 **Parallels Desktop 26 + Windows 11 ARM**：
 
 1. 把 iPhone USB 独占分配给 Windows，并让 Parallels 记住该选择。Parallels 当前文档明确支持把 Apple iPhone 连接到 Windows。[USB 直通说明](https://docs.parallels.com/landing/pdfm-ug/parallels-desktop-for-mac-26-users-guide/use-windows-on-your-mac/connecting-external-devices)

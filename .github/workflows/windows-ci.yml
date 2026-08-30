@@ -22,17 +22,17 @@ jobs:
             os: windows-2022
             generator: Visual Studio 17 2022
             architecture: x64
-            artifact: valeria-windows-vs2022-x64
+            package_name: ValeriaMirror-Windows-x64
           - name: Windows Server 2025 / VS 2026 / x64
             os: windows-2025-vs2026
             generator: Visual Studio 18 2026
             architecture: x64
-            artifact: valeria-windows-vs2026-x64
+            package_name: ValeriaMirror-Windows-x64-vs2026
           - name: Windows 11 / VS 2026 / ARM64
             os: windows-11-vs2026-arm
             generator: Visual Studio 18 2026
             architecture: ARM64
-            artifact: valeria-windows-vs2026-arm64
+            package_name: ValeriaMirror-Windows-arm64
 
     steps:
       - name: Check out source
@@ -103,7 +103,8 @@ jobs:
             -G "${{ matrix.generator }}" `
             -A "${{ matrix.architecture }}" `
             -DVALERIA_BUILD_TESTS=ON `
-            -DVALERIA_BUILD_ACTIVATOR=ON
+            -DVALERIA_BUILD_ACTIVATOR=ON `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
       - name: Build
         shell: pwsh
@@ -131,18 +132,94 @@ jobs:
               throw "valeria-activate.exe --help failed"
           }
 
-      - name: Upload Windows test package
+      - name: Assemble portable tester package
+        shell: pwsh
+        run: |
+          $packageName = '${{ matrix.package_name }}'
+          $outputDirectory = Join-Path $PWD 'package-output'
+          $packageRoot = Join-Path $outputDirectory $packageName
+
+          New-Item -ItemType Directory -Path (Join-Path $packageRoot 'bin') -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageRoot 'scripts') -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageRoot 'licenses') -Force | Out-Null
+
+          Copy-Item `
+            .\windows-build\Release\iphone-valeria-mirror.exe `
+            (Join-Path $packageRoot 'bin\iphone-valeria-mirror.exe')
+          Copy-Item `
+            .\windows-build\activation\Release\valeria-activate.exe `
+            (Join-Path $packageRoot 'bin\valeria-activate.exe')
+          Copy-Item .\windows-mirror\scripts\* (Join-Path $packageRoot 'scripts') -Recurse
+          Copy-Item .\windows-mirror\package\* $packageRoot -Recurse
+          Copy-Item .\windows-mirror\README.md (Join-Path $packageRoot 'TECHNICAL-README.md')
+          Copy-Item .\windows-mirror\driver\README.md (Join-Path $packageRoot 'DRIVER-DETAILS.md')
+          Copy-Item .\windows-mirror\THIRD_PARTY_NOTICES.md $packageRoot
+          Copy-Item .\windows-mirror\LICENSES\* (Join-Path $packageRoot 'licenses') -Recurse
+          Copy-Item .\LICENSE (Join-Path $packageRoot 'LICENSE')
+
+          @(
+              "Package=$packageName"
+              "Architecture=${{ matrix.architecture }}"
+              "Runner=${{ matrix.os }}"
+              "Generator=${{ matrix.generator }}"
+              "Commit=$env:GITHUB_SHA"
+              "BuiltUtc=$([DateTime]::UtcNow.ToString('o'))"
+              'Runtime=static MSVC CRT'
+          ) | Set-Content -LiteralPath (Join-Path $packageRoot 'BUILD-INFO.txt') -Encoding utf8
+
+          $executableHashes = Get-ChildItem -LiteralPath (Join-Path $packageRoot 'bin') -File |
+              Sort-Object Name |
+              ForEach-Object {
+                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  "$hash  bin/$($_.Name)"
+              }
+          $executableHashes |
+              Set-Content -LiteralPath (Join-Path $packageRoot 'SHA256SUMS.txt') -Encoding ascii
+
+          $zipPath = Join-Path $outputDirectory "$packageName.zip"
+          Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
+          $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$zipHash  $packageName.zip" |
+              Set-Content -LiteralPath "$zipPath.sha256" -Encoding ascii
+
+      - name: Validate portable tester package
+        shell: pwsh
+        run: |
+          $packageName = '${{ matrix.package_name }}'
+          $zipPath = Join-Path $PWD "package-output\$packageName.zip"
+          $verificationRoot = Join-Path $PWD 'package-verification'
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $verificationRoot
+          $packageRoot = Join-Path $verificationRoot $packageName
+
+          $requiredFiles = @(
+              'README-FIRST.zh-CN.md',
+              '01-Preflight.cmd',
+              '02-Prepare-MI02.cmd',
+              '03-Start-Mirror.cmd',
+              '04-Restore-Apple-MI02.cmd',
+              'bin\iphone-valeria-mirror.exe',
+              'bin\valeria-activate.exe',
+              'scripts\ValeriaUsb.Common.ps1',
+              'BUILD-INFO.txt',
+              'SHA256SUMS.txt'
+          )
+          foreach ($relativePath in $requiredFiles) {
+              if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $relativePath) -PathType Leaf)) {
+                  throw "Portable package is missing $relativePath"
+              }
+          }
+
+          & (Join-Path $packageRoot 'bin\iphone-valeria-mirror.exe') --help
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged mirror --help failed' }
+          & (Join-Path $packageRoot 'bin\valeria-activate.exe') --help
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged activator --help failed' }
+
+      - name: Upload portable Windows tester package
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ matrix.package_name }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            windows-build/Release/iphone-valeria-mirror.exe
-            windows-build/Release/valeria_core_tests.exe
-            windows-build/activation/Release/valeria-activate.exe
-            windows-mirror/scripts/
-            windows-mirror/README.md
-            windows-mirror/driver/README.md
-            windows-mirror/THIRD_PARTY_NOTICES.md
-            windows-mirror/LICENSES/
+            package-output/${{ matrix.package_name }}.zip
+            package-output/${{ matrix.package_name }}.zip.sha256
